@@ -5,7 +5,8 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('', include('core.urls')),  # ✅ Include core app's URLs
+    path('', include('core.urls')),  
+    path('msg/', include('messaging.urls')),  # ✅ Remove the leading slash
 ]
 
 if settings.DEBUG:
