@@ -1,6 +1,26 @@
 from django.db import models
 from django.utils import timezone
 
+class VolunteerRequests(models.Model):
+
+    volunteer = models.ForeignKey(
+        'GeneralUser',
+        on_delete=models.CASCADE,
+        related_name='volunteer_requests'
+    )
+    group = models.ForeignKey(
+        'AdminGroups',
+        on_delete=models.CASCADE,
+        related_name='group_requests'
+    )
+    phone = models.CharField(max_length=20)
+    address = models.TextField()
+    requested_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.volunteer.email} - {self.group.group_name} "
+
+
 class AdminVerifierUser(models.Model):
     email = models.EmailField(unique=True)
     password = models.CharField(max_length=128)  # Store hashed passwords
@@ -52,24 +72,28 @@ class AdminUser(models.Model):
     def __str__(self):
         return self.email
     
-class Volunteer(models.Model):
-    volunteer_id = models.CharField(max_length=50, unique=True)  # Unique Volunteer ID
-    name = models.CharField(max_length=255)  # Name
-    mobile_number = models.CharField(max_length=15, unique=True)  # Contact
-
+class GeneralUser(models.Model):
+    full_name = models.CharField(max_length=255, help_text="User's full name")
+    email = models.EmailField(unique=True, help_text="User's email address")
+    mobile_number = models.CharField(max_length=15, unique=True, help_text="Mobile number with country code")
+    street_address = models.CharField(max_length=255, help_text="Street address")
+    city = models.CharField(max_length=100, help_text="City")
+    state = models.CharField(max_length=100, help_text="State")
+    is_volunteer = models.BooleanField(default=False, help_text="Flag to mark user as volunteer")
+    
+    created_at = models.DateTimeField(default=timezone.now)
+    
     def __str__(self):
-        return f"{self.name} ({self.volunteer_id})"
-    
+        return self.email
+
 class AdminGroups(models.Model):
-    group_name = models.CharField(max_length=255, unique=True)  # Unique group name
-    created_on = models.DateTimeField(default=timezone.now)  # Timestamp of creation
+    group_name = models.CharField(max_length=255, unique=True, help_text="Unique group name")
+    created_on = models.DateTimeField(default=timezone.now, help_text="Timestamp of creation")
+    admin = models.ForeignKey('AdminUser', on_delete=models.CASCADE, related_name='admin_groups', help_text="Group admin")
+    city = models.CharField(max_length=100, help_text="City")
+    # Change Many-to-Many linking to the new GeneralUser model
+    allowed_volunteers = models.ManyToManyField(GeneralUser, related_name='accessible_groups', blank=True, help_text="Volunteers allowed in this group")
     
-    # One admin per group
-    admin = models.ForeignKey('AdminUser', on_delete=models.CASCADE, related_name='admin_groups')
-
-    # Many-to-Many for volunteer access (optional)
-    allowed_volunteers = models.ManyToManyField(Volunteer, related_name='accessible_groups', blank=True)
-
     def __str__(self):
         return self.group_name
     
@@ -90,7 +114,7 @@ class SubTask(models.Model):
     completed_on = models.DateTimeField(null=True, blank=True)  # Timestamp of completion    
     # Assigned Volunteer (optional)
     assigned_volunteer = models.ForeignKey(
-        'Volunteer', on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_subtasks'
+        'GeneralUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_subtasks'
     )
 
     def __str__(self):

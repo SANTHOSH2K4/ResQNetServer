@@ -1,11 +1,11 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .serializers import AdminLoginSerializer, AdminUserSerializer, AdminGroupsSerializer, TodoTitleSerializer, SubTaskSerializer
+from .serializers import VolunteerRequestsSerializer ,GroupSerializer,GeneralUserSerializer, AdminLoginSerializer, AdminUserSerializer, AdminGroupsSerializer, TodoTitleSerializer, SubTaskSerializer
 from django.core.files.base import ContentFile
 import io
 from PyPDF2 import PdfMerger
-from .models import AdminUser,TodoTitle, SubTask, AdminGroups
+from .models import AdminUser,TodoTitle, SubTask, AdminGroups, GeneralUser, VolunteerRequests
 from django.shortcuts import get_object_or_404
 from django.http import FileResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -15,6 +15,360 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+import json
+import random
+import requests
+from django.http import JsonResponse, HttpResponseBadRequest
+
+otp_storage = {}
+
+class ApproveVolunteerView(APIView):
+    """
+    API endpoint to approve a volunteer request.
+    Updates the GeneralUser's is_volunteer status and adds them to the group's allowed_volunteers.
+    Then broadcasts an update via the phone-number WebSocket.
+    """
+    def post(self, request):
+        volunteer_id = request.data.get('volunteer_id')
+        group_id = request.data.get('group_id')
+        print(volunteer_id, "for that volunteer", group_id, "for this group")
+        
+        # Validate required fields
+        if not volunteer_id or not group_id:
+            return Response(
+                {"error": "Both volunteer_id and group_id are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # Find the GeneralUser
+            volunteer = GeneralUser.objects.get(id=volunteer_id)
+            print(volunteer)
+        except GeneralUser.DoesNotExist:
+            return Response(
+                {"error": "Volunteer not found with the provided ID."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            # Find the AdminGroups
+            group = AdminGroups.objects.get(id=group_id)
+            print(group)
+        except AdminGroups.DoesNotExist:
+            return Response(
+                {"error": "Group not found with the provided ID."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            # Update the GeneralUser's is_volunteer status
+            volunteer.is_volunteer = True
+            volunteer.save()
+
+            # Add the user to the group's allowed_volunteers
+            group.allowed_volunteers.add(volunteer)
+
+            # Broadcast the update to the volunteer's phone WebSocket.
+            # Sanitize the phone number for the group name by replacing '+' with 'plus'
+            channel_layer = get_channel_layer()
+            sanitized_phone = volunteer.mobile_number.replace("+", "plus")
+            group_name = f"phone_updates_{sanitized_phone}"
+            
+            message_data = {
+                "action": "volunteer_approved",
+                "volunteer_id": volunteer.id,
+                "group_id": group.id,
+                "volunteer_name": volunteer.full_name,
+                "group_name": group.group_name,
+                "isvolunteer": True  # Instruct the client to set session?.isvolunteer === true
+            }
+            
+            async_to_sync(channel_layer.group_send)(
+                group_name,
+                {
+                    "type": "send_phone_update",  # This calls PhoneConsumer.send_phone_update
+                    "data": message_data
+                }
+            )
+
+            return Response(
+                {
+                    "message": "Volunteer approved successfully.",
+                    "volunteer_id": volunteer.id,
+                    "group_id": group.id,
+                    "volunteer_name": volunteer.full_name,
+                    "group_name": group.group_name
+                },
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            print("An error occurred: ", str(e))
+            return Response(
+                {"error": f"An error occurred: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class CreateGroupView(APIView):
+    """
+    API endpoint to create a new group.
+    Expects group_name, city, and phone (admin's phone).
+    The view looks up the AdminUser using the phone.
+    """
+    def post(self, request):
+        group_name = request.data.get("group_name")
+        city = request.data.get("city")
+        phone = request.data.get("phone")  # Expect admin phone
+        
+        print(f"Requested for {group_name} and {city} and {phone}")
+        
+        if not group_name or not city or not phone:
+            return Response(
+                {"error": "group_name, city, and phone are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Look up the admin using the phone number.
+            admin = AdminUser.objects.get(mobile_number=phone)
+        except AdminUser.DoesNotExist:
+            return Response({"error": "Admin not found with that phone number."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Build payload using admin's primary key.
+        group_data = {
+            "group_name": group_name,
+            "city": city,
+            "admin": admin.id,
+            "phone": phone,
+            "address": admin.address  # Assuming AdminUser has address field
+        }
+        
+        serializer = GroupSerializer(data=group_data, context={'phone': phone})
+        if serializer.is_valid():
+            group = serializer.save()
+            broadcast_progress_update(serializer.data.get("admin"))
+            broadcast_new_group(city, serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class CreateVolunteerRequestView(APIView):
+    """
+    API endpoint to create a volunteer request.
+    Expects volunteer_id, group_id, group_admin_id, phone, and address.
+    """
+    def post(self, request):
+        volunteer_id = request.data.get("volunteer_id")
+        group_id = request.data.get("group_id")
+        group_admin_id = request.data.get("group_admin_id")
+        phone = request.data.get("phone")
+        address = request.data.get("address", "")
+        
+        if not volunteer_id or not group_id or not group_admin_id or not phone:
+            return Response(
+                {"error": "volunteer_id, group_id, group_admin_id, and phone are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            volunteer = GeneralUser.objects.get(id=volunteer_id)
+            group = AdminGroups.objects.get(id=group_id)
+        except (GeneralUser.DoesNotExist, AdminGroups.DoesNotExist):
+            return Response({"error": "Invalid volunteer_id or group_id."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create the volunteer request record
+        volunteer_request = VolunteerRequests.objects.create(
+            volunteer=volunteer,
+            group=group
+        )
+        serializer = VolunteerRequestsSerializer(volunteer_request)
+        
+        # Broadcast new volunteer request to the admin's WebSocket group.
+        data_to_send = serializer.data
+        data_to_send.update({
+            "volunteer_name": volunteer.full_name,  # Assuming 'name' is a field in GeneralUser
+            "phone": phone,
+            "address": address
+        })
+        print("-----------------------------------------------\n\n\n\n")
+        print(data_to_send)
+        print("-----------------------------------------------\n\n\n\n")
+        channel_layer = get_channel_layer()
+        admin_ws_group = f"volunteer_requests_admin_{group_admin_id}"
+        async_to_sync(channel_layer.group_send)(
+            admin_ws_group,
+            {
+                "type": "new_volunteer_request",
+                "data": data_to_send
+            }
+        )
+        
+        return Response(data_to_send, status=status.HTTP_201_CREATED)
+
+
+def broadcast_new_group(city, group_data):
+    """
+    Broadcasts a new group creation event to all connected users in the same city.
+    """
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        city,  # Send to city-specific WebSocket group
+        {
+            "type": "new_group",
+            "data": group_data  # The group details
+        }
+    )    
+
+class GroupListView(APIView):
+    """
+    API endpoint that fetches groups where the group's city matches the given query parameter.
+    It also returns a boolean `isvolunteer` indicating if the logged-in user's phone number 
+    exists in the group's allowed_volunteers.
+    """
+    def get(self, request):
+        city = request.query_params.get('city')
+        phone = request.query_params.get('phone')
+        print(f"Requested for {city} and {phone}")
+        if not city or not phone:
+            return Response(
+                {"error": "Both 'city' and 'phone' query parameters are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        groups = AdminGroups.objects.filter(city=city)
+        serializer = GroupSerializer(groups, many=True, context={'phone': phone})
+        print(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+def send_sms(phone, message):
+    # Use your SMS sending endpoint
+    url = "http://192.168.84.105:8000/msg/add_message/"
+    payload = json.dumps({"phn_no": phone, "message": message})
+    headers = {"Content-Type": "application/json"}
+    requests.post(url, data=payload, headers=headers)
+
+@csrf_exempt
+def send_otp(request):
+    if request.method != 'POST':
+        return HttpResponseBadRequest("Only POST allowed")
+    try:
+        data = json.loads(request.body)
+        phone = data.get("phone")
+        if not phone:
+            return HttpResponseBadRequest("Phone number is required")
+        
+        # Check if the phone number exists in AdminUser or GeneralUser
+        admin_qs = AdminUser.objects.filter(mobile_number=phone)
+        general_qs = GeneralUser.objects.filter(mobile_number=phone)
+        
+        # Determine if we should send OTP:
+        if admin_qs.exists():
+            admin = admin_qs.first()
+            if admin.verified:
+                # Verified admin: OK to send OTP.
+                pass
+            else:
+                # Admin exists but is not verified; check for a GeneralUser record.
+                if not general_qs.exists():
+                    return JsonResponse({"status": "failed", "message": "User not found"}, status=400)
+        else:
+            # No admin record exists; require a GeneralUser record.
+            if not general_qs.exists():
+                return JsonResponse({"status": "failed", "message": "You are not registered"}, status=400)
+        
+        # Generate a 4-digit OTP
+        otp = str(random.randint(1000, 9999))
+        otp_storage[phone] = otp
+        print(f"heres the otp {otp}")
+        # Send OTP via SMS (make sure send_sms is defined properly)
+        send_sms(phone, f"Your OTP is {otp}")
+        return JsonResponse({"status": "success", "message": "OTP sent"})
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("Invalid JSON format")
+
+@csrf_exempt
+def verify_otp(request):
+    if request.method != 'POST':
+        return HttpResponseBadRequest("Only POST allowed")
+    try:
+        data = json.loads(request.body)
+        phone = data.get("phone")
+        entered_otp = data.get("otp")
+        if not phone or not entered_otp:
+            return HttpResponseBadRequest("Phone and OTP are required")
+        
+        stored_otp = otp_storage.get(phone)
+        if not stored_otp:
+            return JsonResponse({"status": "failed", "message": "OTP expired or invalid"}, status=400)
+        
+        if str(stored_otp) != str(entered_otp):
+            return JsonResponse({"status": "failed", "message": "Invalid OTP"}, status=400)
+        
+        # OTP is valid; determine which user record matches
+        user_data = None
+        admin_qs = AdminUser.objects.filter(mobile_number=phone)
+        general_qs = GeneralUser.objects.filter(mobile_number=phone)
+        
+        if admin_qs.exists():
+            admin = admin_qs.first()
+            if admin.verified:
+                # Verified admin: return admin details
+                user_data = {
+                    "id": admin.id,
+                    "username": admin.name,
+                    "user_type": "admin",
+                    "phone": admin.mobile_number,
+                    "email": admin.email,
+                    "city": admin.city,
+                    "state": admin.state,
+                    "isvolunteer": False,
+                }
+            else:
+                # Admin exists but not verified, check for general user record
+                if general_qs.exists():
+                    general = general_qs.first()
+                    user_data = {
+                        "id": general.id,
+                        "username": general.full_name,
+                        "user_type": "general",
+                        "phone": general.mobile_number,
+                        "email": general.email,
+                        "city": general.city,
+                        "state": general.state,
+                        "isvolunteer": True,
+                    }
+                else:
+                    return JsonResponse({"status": "failed", "message": "User not found"}, status=400)
+        else:
+            # No admin record found, check for a general user record
+            if general_qs.exists():
+                general = general_qs.first()
+                user_data = {
+                    "id": general.id,
+                    "username": general.full_name,
+                    "user_type": "general",
+                    "phone": general.mobile_number,
+                    "email": general.email,
+                    "city": general.city,
+                    "state": general.state,
+                    "isvolunteer": general.is_volunteer,
+                }
+            else:
+                return JsonResponse({"status": "failed", "message": "User not found"}, status=400)
+        
+        # Remove OTP after successful verification
+        del otp_storage[phone]
+        print(user_data)
+        return JsonResponse({"status": "success", "message": "OTP verified", "user": user_data})
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("Invalid JSON format")
+
+
+        
+        # Remove OTP after successful verification
+        del otp_storage[phone]
+        return JsonResponse({"status": "success", "message": "OTP verified", "user": user_data})
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("Invalid JSON format")
+
 
 
 class AdminVerifierLoginView(APIView):
@@ -31,6 +385,20 @@ class AdminVerifierLoginView(APIView):
             return Response({"message": "Login successful"}, status=status.HTTP_200_OK)
         
         print("🔸 Serializer Errors:", serializer.errors)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+class GeneralUserRegistrationView(APIView):
+    """
+    API endpoint for registering a general user.
+    Expected fields: full_name, email, mobile_number, street_address, city, state.
+    is_volunteer is optional (defaults to False).
+    """
+    def post(self, request):
+        print(request.data)
+        serializer = GeneralUserSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -217,7 +585,8 @@ class RevokeAdminPrivilegesView(APIView):
         admin_user.delete()
         
         return Response({"detail": f"Admin {pk} privileges revoked"}, status=status.HTTP_200_OK)
-    
+
+
 class AdminGroupsListView(APIView):
     """
     Retrieves a list of groups (id and group_name) for a specific admin.
