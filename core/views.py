@@ -499,6 +499,7 @@ class AdminUserRegistrationView(APIView):
     On success, broadcasts the new admin info via Channels.
     """
     def post(self, request):
+        print("Admin Request is happening...")
         mobile_number = request.data.get("mobile_number", "unknown")
         
         # Retrieve identity documents (all 5 expected documents)

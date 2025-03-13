@@ -72,3 +72,4 @@ class GeneralUserSerializer(serializers.ModelSerializer):
         model = GeneralUser
         # Only include the fields you expect from the registration form
         fields = ['full_name', 'email', 'mobile_number', 'street_address', 'city', 'state', 'is_volunteer']
+
