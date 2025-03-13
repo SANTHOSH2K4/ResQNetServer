@@ -23,6 +23,7 @@ from django.utils import timezone
 
 otp_storage = {}
 
+
 class SendMessageView(APIView):
     def post(self, request, format=None):
         data = request.data
@@ -323,7 +324,7 @@ class GroupListView(APIView):
 
 def send_sms(phone, message):
     # Use your SMS sending endpoint
-    url = "http://172.20.110.32:8000/msg/add_message/"
+    url = "http://192.168.84.105:8000/msg/add_message/"
     payload = json.dumps({"phn_no": phone, "message": message})
     headers = {"Content-Type": "application/json"}
     requests.post(url, data=payload, headers=headers)
@@ -497,12 +498,17 @@ class AdminUserRegistrationView(APIView):
     """
     Handles admin user registration, merging uploaded identity documents.
     On success, broadcasts the new admin info via Channels.
+    Verbose logging added for each step.
     """
     def post(self, request):
-        print("Admin Request is happening...")
-        mobile_number = request.data.get("mobile_number", "unknown")
+        print("=== Admin Registration Request Received ===")
+        print("Request DATA keys:", list(request.data.keys()))
+        print("Request FILES keys:", list(request.FILES.keys()))
         
-        # Retrieve identity documents (all 5 expected documents)
+        mobile_number = request.data.get("mobile_number", "unknown")
+        print("Mobile number extracted:", mobile_number)
+        
+        # Retrieve identity documents (all expected documents)
         identity_documents = [
             request.FILES.get("identity_document1"),
             request.FILES.get("identity_document2"),
@@ -511,20 +517,30 @@ class AdminUserRegistrationView(APIView):
             request.FILES.get("authorization_letter"),
         ]
         identity_documents = [doc for doc in identity_documents if doc]
+        print("Found identity documents:", [doc.name for doc in identity_documents])
         
         if identity_documents:
-            merger = PdfMerger()
-            for doc in identity_documents:
-                merger.append(doc)
-            output_stream = io.BytesIO()
-            merger.write(output_stream)
-            merger.close()
-            output_stream.seek(0)
-            merged_file = ContentFile(output_stream.read(), name=f"{mobile_number}_iddocs.pdf")
-            if hasattr(request.data, '_mutable') and not request.data._mutable:
-                request.data._mutable = True
-            request.data["merged_documents"] = merged_file
-
+            try:
+                merger = PdfMerger()
+                for doc in identity_documents:
+                    print("Appending document:", doc.name)
+                    merger.append(doc)
+                output_stream = io.BytesIO()
+                merger.write(output_stream)
+                merger.close()
+                output_stream.seek(0)
+                merged_file = ContentFile(output_stream.read(), name=f"{mobile_number}_iddocs.pdf")
+                print("Merged file created with name:", merged_file.name)
+                # If request.data is immutable, make it mutable
+                if hasattr(request.data, '_mutable') and not request.data._mutable:
+                    request.data._mutable = True
+                request.data["merged_documents"] = merged_file
+                print("Merged file attached to request.data as 'merged_documents'")
+            except Exception as e:
+                print("Error during PDF merging:", str(e))
+        else:
+            print("No identity documents found to merge.")
+        
         # Rename additional file fields
         file_fields = {
             "live_selfie_capture": "selfie",
@@ -536,17 +552,28 @@ class AdminUserRegistrationView(APIView):
             file_obj = request.FILES.get(field)
             if file_obj:
                 ext = file_obj.name.split('.')[-1]
-                file_obj.name = f"{mobile_number}_{suffix}.{ext}"
+                new_name = f"{mobile_number}_{suffix}.{ext}"
+                print(f"Renaming file field '{field}': {file_obj.name} --> {new_name}")
+                file_obj.name = new_name
         
-        # Process additional fields for job and gender (if present)
+        # Process additional fields (e.g., job and gender) if present
         if request.data.get("job"):
-            request.data["job"] = request.data["job"]
+            print("Job provided:", request.data.get("job"))
+        else:
+            print("No job provided in request.data.")
         if request.data.get("gender"):
-            request.data["gender"] = request.data["gender"]
+            print("Gender provided:", request.data.get("gender"))
+        else:
+            print("No gender provided in request.data.")
         
+        print("Initializing serializer with request data...")
         serializer = AdminUserSerializer(data=request.data)
+        
         if serializer.is_valid():
+            print("Serializer validated successfully. Saving admin user...")
             admin_user = serializer.save()
+            print("Admin user saved. Serializer data:", serializer.data)
+            
             # Broadcast the new admin info via Channels
             channel_layer = get_channel_layer()
             async_to_sync(channel_layer.group_send)(
@@ -556,9 +583,11 @@ class AdminUserRegistrationView(APIView):
                     "admin": serializer.data,
                 }
             )
+            print("Broadcast complete to 'new_admin_users' channel.")
             return Response(serializer.data, status=status.HTTP_201_CREATED)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            print("Serializer errors encountered:", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class AdminUserSummaryView(APIView):
     """
@@ -776,10 +805,34 @@ class TodoTitleCreateView(APIView):
     def post(self, request):
         serializer = TodoTitleSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            broadcast_progress_update(serializer.data.get("created_by"))
+            todo = serializer.save()
+            # Broadcast the new task only to group members other than the creator.
+            creator = request.user  # Assuming authentication sets request.user
+            updater_phone = creator.mobile_number if hasattr(creator, 'mobile_number') else None
+            # Adjust the filtering below as per your “group” logic.
+            receivers = list(AdminUser.objects.filter(city=creator.city).exclude(mobile_number=updater_phone)) \
+                        + list(GeneralUser.objects.filter(city=creator.city))
+            channel_layer = get_channel_layer()
+            for receiver in receivers:
+                phone = receiver.mobile_number
+                if not phone:
+                    continue
+                # Sanitize phone number for group naming.
+                sanitized_phone = phone.replace("+", "plus")
+                receiver_group_name = f"phone_updates_{sanitized_phone}"
+                async_to_sync(channel_layer.group_send)(
+                    receiver_group_name,
+                    {
+                        "type": "send_task_update",
+                        "data": {
+                            "action": "new_task",
+                            "todo": serializer.data,  # Send entire task data
+                        }
+                    }
+                )
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 class TodoTitleUpdateView(APIView):
     """
@@ -799,34 +852,217 @@ class TodoTitleUpdateView(APIView):
 
 class SubTaskCreateView(APIView):
     """
-    POST endpoint to create a new SubTask record.
-    Expects JSON with: todo_title (ID), description, completed (boolean),
-    completion_approved (boolean), assigned_volunteer (optional)
+    POST endpoint to create a new SubTask.
+    Expects JSON with:
+      - todo_title (ID of the parent task)
+      - description (text)
+      - assigned_volunteer (optional, ID of the volunteer)
     """
-    def post(self, request):
+    def post(self, request, format=None):
         serializer = SubTaskSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            # Retrieve admin id from parent TodoTitle.
-            todo_id = serializer.data.get("todo_title")
-            from .models import TodoTitle  # Import here to avoid circular imports.
-            todo = TodoTitle.objects.get(pk=todo_id)
-            broadcast_progress_update(todo.created_by_id)
+            subtask = serializer.save()
+            # Broadcast the new subtask creation event
+            updater = request.user  # Assuming you have authentication in place.
+            updater_phone = updater.mobile_number if hasattr(updater, 'mobile_number') else None
+            
+            # Assume that the parent task (TodoTitle) has a created_by field with a city or group identifier.
+            todo_title = subtask.todo_title
+
+            # Determine receivers:
+            # For a subtask, broadcast to all group admins and general users,
+            # excluding the creator if needed.
+            receivers = list(AdminUser.objects.filter(city=todo_title.created_by.city).exclude(mobile_number=updater_phone)) \
+                        + list(GeneralUser.objects.filter(city=todo_title.created_by.city))
+            
+            channel_layer = get_channel_layer()
+            for receiver in receivers:
+                phone = receiver.mobile_number
+                if not phone:
+                    continue
+                # Sanitize phone for group naming.
+                sanitized_phone = phone.replace("+", "plus")
+                receiver_group_name = f"phone_updates_{sanitized_phone}"
+                async_to_sync(channel_layer.group_send)(
+                    receiver_group_name,
+                    {
+                        "type": "send_task_update",  # This triggers PhoneConsumer.send_task_update on the client
+                        "data": {
+                            "action": "new_subtask",
+                            "subtask": serializer.data,  # Send the new subtask data
+                        }
+                    }
+                )
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class SubTaskUpdateView(APIView):
     """
-    POST endpoint to update an existing SubTask record.
-    Expects JSON with fields to update.
+    POST endpoint to update a SubTask's status.
+    Expects JSON with: todo_title_id, subtask_id, new_status.
     """
-    def post(self, request, pk):
-        subtask = get_object_or_404(SubTask, pk=pk)
-        serializer = SubTaskSerializer(subtask, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            from .models import TodoTitle
-            todo = TodoTitle.objects.get(pk=subtask.todo_title_id)
-            broadcast_progress_update(todo.created_by_id)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    def post(self, request):
+        data = request.data
+        todo_title_id = data.get("todo_title_id")
+        subtask_id = data.get("subtask_id")
+        new_status = data.get("new_status")
+        if not (todo_title_id and subtask_id and new_status):
+            return Response({"error": "Missing fields."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            subtask = SubTask.objects.get(id=subtask_id, todo_title_id=todo_title_id)
+        except SubTask.DoesNotExist:
+            return Response({"error": "Subtask not found."}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Update subtask status.
+        if new_status == "completed":
+            subtask.completed = True
+            subtask.completion_approved = True
+            subtask.completed_on = timezone.now()
+        else:
+            subtask.completed = False
+            subtask.completion_approved = False
+        subtask.save()
+
+        # Prepare broadcast message.
+        updater = request.user  # Assume user is set by authentication.
+        updater_phone = updater.mobile_number if hasattr(updater, 'mobile_number') else None
+        
+        # Retrieve group information from the parent TodoTitle (assumed to have created_by with a city or group field)
+        todo_title = subtask.todo_title
+        
+        # Broadcast receivers:
+        # - If an admin updated: broadcast to all other admins and all general users.
+        # - If a volunteer/general user updated: broadcast to all admins and all other general users.
+        if updater.role == "admin":
+            receivers = list(AdminUser.objects.filter(city=todo_title.created_by.city).exclude(mobile_number=updater_phone)) \
+                        + list(GeneralUser.objects.filter(city=todo_title.created_by.city))
+        else:
+            receivers = list(AdminUser.objects.filter(city=todo_title.created_by.city)) \
+                        + list(GeneralUser.objects.filter(city=todo_title.created_by.city).exclude(mobile_number=updater_phone))
+        
+        channel_layer = get_channel_layer()
+        for receiver in receivers:
+            phone = receiver.mobile_number
+            if not phone:
+                continue
+            sanitized_phone = phone.replace("+", "plus")
+            receiver_group_name = f"phone_updates_{sanitized_phone}"
+            async_to_sync(channel_layer.group_send)(
+                receiver_group_name,
+                {
+                    "type": "send_task_update",
+                    "data": {
+                        "action": "update_subtask_status",
+                        "todo_title_id": todo_title_id,
+                        "subtask_id": subtask_id,
+                        "new_status": new_status,
+                        "updater": updater.id,
+                    }
+                }
+            )
+        serializer = SubTaskSerializer(subtask)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+import google.generativeai as genai
+import base64
+import os
+from bing_image_downloader import downloader
+
+model = genai.GenerativeModel('gemini-2.0-flash')
+def clean_json_string(data):
+    cleaned_data = re.sub(r'[\x00-\x1F\x7F]', '', data).strip()
+    try:
+        return json.loads(cleaned_data)
+    except json.JSONDecodeError:
+        return {"error": "Failed to decode JSON. Please check the response format."}
+
+@csrf_exempt
+def trend_extractor_view(request):
+    print("hii")
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        date = data.get("date", "13/03/2025")
+        # trend_data = trend_extractor(date)
+        prompt = (
+        f"""You are a good trend finder. Find a trend based on the given date include location only in india.
+        Return the title in JSON format like this {{"trend":["flood in chennai",""cyclone"]}}.
+        The trend should only be disaster-related trends in India.
+        ##Instruction : Only in JSON format, with multiple values in a list. Each entry should have context limited to 3 words or fewer.
+        ##Query: {date}"""
+    )
+
+        response = model.generate_content(
+            contents=prompt,
+        )
+
+        cleaned_data = re.sub(r'```json|```', '', response.text).strip()
+        print(response.text)
+        trend_data = clean_json_string(cleaned_data)
+        print(trend_data)
+        return JsonResponse(trend_data, safe=False)
+
+def image_to_base64(image_path):
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+    except FileNotFoundError:
+        return "No image found"
+
+@csrf_exempt
+def trend_summarizer_view(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        trend = data.get("trend", "cyclone alert")
+        date = data.get("date", "13/03/2025")
+        prompt = (
+        f"""You are a good summarizer. Summarize the result based on the given date.
+        The summary should be related to disaster trends in India. Return the result more than 1000 words.
+        ##Query: {trend}, ##Date: {date}
+        ##Instruction:
+        1. The summary should provide detailed information without analysis or commentary.
+        2. Return only in String format.
+        3. Add text-based stickers or reactions to improve readability but don't include special symbols like ** or \n like that.
+        5. Summarized values should be based on real-time data, no fabricated information.
+        6. Avoid personal analysis or unrelated content.
+        7. Don't include Okay, here's a detailed summary about directly start with summary.
+        """
+    )
+
+        response = model.generate_content(
+            contents=prompt,
+        )
+        cleaned_data = response.text
+
+        search_term = f"Real time image of a {trend} disaster India"
+        output_path = "media"
+
+        # Download the image
+        new_path = os.path.join(output_path, f"{trend}.png")
+
+        # Download the image
+        downloader.download(search_term, limit=1, output_dir=output_path, adult_filter_off=True, force_replace=False, timeout=60, verbose=True)
+
+        # Locate the downloaded image inside its folder
+        search_folder = os.path.join(output_path, search_term)
+        image_files = [f for f in os.listdir(search_folder) if f.endswith(('.jpg', '.png', '.jpeg'))] if os.path.exists(search_folder) else []
+
+        # Rename and move image to "media/{trend}.png"
+        if image_files:
+            old_path = os.path.join(search_folder, image_files[0])
+
+            # **FIX**: Remove existing file before renaming
+            if os.path.exists(new_path):
+                os.remove(new_path)  # Delete the existing file
+
+            os.rename(old_path, new_path)  # Rename the downloaded file
+            image_path = new_path
+        else:
+            image_path = None
+
+        # Convert image to Base64 if found
+        image_base64 = image_to_base64(image_path) if image_path else "No image found"
+
+        data = {"summary": cleaned_data, "image_base64": image_base64}
+        print(data)
+        return JsonResponse(data)
+

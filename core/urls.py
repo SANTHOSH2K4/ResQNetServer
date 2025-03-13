@@ -8,7 +8,8 @@ from .views import (
     GeneralUserRegistrationView,
     GroupListView, CreateGroupView,
     CreateVolunteerRequestView,ApproveVolunteerView,
-    SendMessageView,
+    SendMessageView, trend_extractor_view,
+    trend_summarizer_view
 )
 
 urlpatterns = [
@@ -36,5 +37,7 @@ urlpatterns = [
     path('api/groups/', GroupListView.as_view(), name='group_list'),
     path('api/create_group/', CreateGroupView.as_view(), name='create_group'),
     path('api/send_message/', SendMessageView.as_view(), name='send_message'),
+    path('api/trend-extractor/', trend_extractor_view, name='trend_extractor_api'),
+    path('api/trend-summarizer/', trend_summarizer_view, name='trend_summarizer_api'),
 
 ]
