@@ -96,6 +96,38 @@ class AdminGroups(models.Model):
     
     def __str__(self):
         return self.group_name
+
+class ChatMessage(models.Model):
+    group = models.ForeignKey(
+        AdminGroups, 
+        on_delete=models.CASCADE, 
+        related_name="messages", 
+        help_text="Group this message belongs to"
+    )
+    type = models.CharField(
+        max_length=50, 
+        help_text="Message type, e.g., 'text', 'image', 'video'"
+    )
+    content = models.TextField(help_text="Message content")
+    timestamp = models.DateTimeField(
+        default=timezone.now, 
+        help_text="Timestamp when the message was sent"
+    )
+    sender = models.CharField(
+        max_length=10, 
+        choices=[('admin', 'Admin'), ('general', 'General User')],
+        help_text="Indicates if the sender is an admin or a general user"
+    )
+    sender_id = models.PositiveIntegerField(
+        help_text="Stores the ID of either an AdminUser or a GeneralUser"
+    )
+    sender_name = models.CharField(
+        max_length=255, 
+        help_text="Name of the sender"
+    )
+
+    def __str__(self):
+        return f"[{self.timestamp}] {self.type} in {self.group.group_name} by {self.sender_name}: {self.content[:30]}"
     
 class TodoTitle(models.Model):
     title = models.CharField(max_length=255, unique=True)  # Unique task title

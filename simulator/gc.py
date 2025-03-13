@@ -2,7 +2,7 @@ import json
 import requests
 
 # Set the URL based on your configuration
-url = "http://192.168.84.83:8000/api/create_group/"
+url = "http://172.20.110.32:8000/api/create_group/"
 
 # Prepare the payload; the API will look up the admin based on this phone number.
 payload = {

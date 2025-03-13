@@ -5,7 +5,7 @@ from .serializers import VolunteerRequestsSerializer ,GroupSerializer,GeneralUse
 from django.core.files.base import ContentFile
 import io
 from PyPDF2 import PdfMerger
-from .models import AdminUser,TodoTitle, SubTask, AdminGroups, GeneralUser, VolunteerRequests
+from .models import AdminUser,TodoTitle, SubTask, AdminGroups, GeneralUser, VolunteerRequests, ChatMessage
 from django.shortcuts import get_object_or_404
 from django.http import FileResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -19,8 +19,91 @@ import json
 import random
 import requests
 from django.http import JsonResponse, HttpResponseBadRequest
+from django.utils import timezone
 
 otp_storage = {}
+
+class SendMessageView(APIView):
+    def post(self, request, format=None):
+        data = request.data
+        group_id = data.get("group_id")
+        msg_type = data.get("type")  # Expected to be "msg"
+        content = data.get("content")
+        sender = data.get("sender")
+        sender_id = data.get("sender_id")
+        sender_name = data.get("sender_name")
+        
+        if not group_id or not content or not sender or not sender_id or not sender_name:
+            return Response(
+                {"error": "Missing required fields."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            group = AdminGroups.objects.get(id=group_id)
+        except AdminGroups.DoesNotExist:
+            return Response(
+                {"error": "Group not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Create a new ChatMessage record
+        chat_message = ChatMessage.objects.create(
+            group=group,
+            type=msg_type,  # "msg"
+            content=content,
+            sender=sender,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            timestamp=timezone.now()
+        )
+        
+        response_data = {
+            "id": str(chat_message.id),
+            "group": group.group_name,
+            "group_id": group_id,  # Include group_id in response
+            "type": chat_message.type,
+            "content": chat_message.content,
+            "timestamp": chat_message.timestamp,
+            "sender": chat_message.sender,
+            "sender_id": chat_message.sender_id,
+            "sender_name": chat_message.sender_name,
+        }
+        
+        # Identify receivers based on group city
+        channel_layer = get_channel_layer()
+        admin_receivers = AdminUser.objects.filter(city=group.city)
+        general_receivers = GeneralUser.objects.filter(city=group.city)
+        all_receivers = list(admin_receivers) + list(general_receivers)
+        
+        # Broadcast the new chat message to each receiver's group channel.
+        for receiver in all_receivers:
+            phone = getattr(receiver, 'mobile_number', None)
+            if not phone:
+                continue
+            sanitized_phone = phone.replace("+", "plus")
+            receiver_group_name = f"phone_updates_{sanitized_phone}"
+            
+            async_to_sync(channel_layer.group_send)(
+                receiver_group_name,
+                {
+                    "type": "send_chat_update",  # This triggers PhoneConsumer.send_chat_update
+                    "data": {
+                        "action": "new_chat_message",
+                        "id": str(chat_message.id),
+                        "group": group.group_name,
+                        "group_id": group_id,  # Include group_id
+                        "type": chat_message.type,
+                        "content": chat_message.content,
+                        "timestamp": chat_message.timestamp.isoformat(),
+                        "sender": chat_message.sender,
+                        "sender_id": chat_message.sender_id,
+                        "sender_name": chat_message.sender_name,
+                    }
+                }
+            )
+        
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 class ApproveVolunteerView(APIView):
     """
@@ -240,10 +323,12 @@ class GroupListView(APIView):
 
 def send_sms(phone, message):
     # Use your SMS sending endpoint
-    url = "http://192.168.84.105:8000/msg/add_message/"
+    url = "http://172.20.110.32:8000/msg/add_message/"
     payload = json.dumps({"phn_no": phone, "message": message})
     headers = {"Content-Type": "application/json"}
     requests.post(url, data=payload, headers=headers)
+
+import re
 
 @csrf_exempt
 def send_otp(request):
@@ -278,8 +363,14 @@ def send_otp(request):
         otp = str(random.randint(1000, 9999))
         otp_storage[phone] = otp
         print(f"heres the otp {otp}")
+        phone = re.sub(r'^\+91', '', phone)  # Remove country code if present
+        phone = re.sub(r'\s+', '', phone)
+        print(type(phone))
+        print(phone)
+        phone=int(phone)
+        print(type(phone))
         # Send OTP via SMS (make sure send_sms is defined properly)
-        send_sms(phone, f"Your OTP is {otp}")
+        send_sms(int(phone), f"Your code is {otp}")
         return JsonResponse({"status": "success", "message": "OTP sent"})
     except json.JSONDecodeError:
         return HttpResponseBadRequest("Invalid JSON format")

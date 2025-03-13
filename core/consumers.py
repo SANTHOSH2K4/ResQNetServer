@@ -97,3 +97,17 @@ class PhoneConsumer(AsyncWebsocketConsumer):
             "type": "Phone Update",
             "data": event["data"]
         }))
+        
+    async def send_chat_update(self, event):
+        """Send chat messages to the WebSocket client."""
+        await self.send(text_data=json.dumps({
+            "type": "chat_message",
+            "data": event["data"]
+        }))
+
+    async def send_task_update(self, event):
+        """Send task updates to the WebSocket client."""
+        await self.send(text_data=json.dumps({
+            "type": "task_update",
+            "data": event["data"]
+        }))    

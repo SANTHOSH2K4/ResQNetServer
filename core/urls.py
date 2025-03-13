@@ -7,7 +7,8 @@ from .views import (
     send_otp, verify_otp,
     GeneralUserRegistrationView,
     GroupListView, CreateGroupView,
-    CreateVolunteerRequestView,ApproveVolunteerView
+    CreateVolunteerRequestView,ApproveVolunteerView,
+    SendMessageView,
 )
 
 urlpatterns = [
@@ -24,7 +25,7 @@ urlpatterns = [
     path('revoke-admin/<int:pk>/', RevokeAdminPrivilegesView.as_view(), name='revoke-admin'),
     path('admin-groups/<int:admin_id>/', AdminGroupsListView.as_view(), name='admin-groups-list'),
     path('admin-todos/<int:admin_id>/', AdminTodosView.as_view(), name='admin-todos'),
-     path('admin-group-create/', AdminGroupsCreateView.as_view(), name='admin-groups-create'),
+    path('admin-group-create/', AdminGroupsCreateView.as_view(), name='admin-groups-create'),
     path('admin-group-update/<int:pk>/update/', AdminGroupsUpdateView.as_view(), name='admin-groups-update'),
     path('todo-titles/', TodoTitleCreateView.as_view(), name='todo-titles-create'),
     path('todo-titles/<int:pk>/update/', TodoTitleUpdateView.as_view(), name='todo-titles-update'),    
@@ -34,5 +35,6 @@ urlpatterns = [
     path('api/verify_otp/', verify_otp, name='verify_otp'),
     path('api/groups/', GroupListView.as_view(), name='group_list'),
     path('api/create_group/', CreateGroupView.as_view(), name='create_group'),
+    path('api/send_message/', SendMessageView.as_view(), name='send_message'),
 
 ]
