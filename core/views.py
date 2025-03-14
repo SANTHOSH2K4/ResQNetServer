@@ -21,9 +21,14 @@ import requests
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.utils import timezone
 
+import google.generativeai as genai
+import base64
+import os
+from bing_image_downloader import downloader
+
 otp_storage = {}
 
-
+genai.configure(api_key="AIzaSyBMugtwcla3HhBCvYbf42BGHcalDyKQ5g0")
 class SendMessageView(APIView):
     def post(self, request, format=None):
         data = request.data
@@ -324,7 +329,7 @@ class GroupListView(APIView):
 
 def send_sms(phone, message):
     # Use your SMS sending endpoint
-    url = "http://192.168.84.105:8000/msg/add_message/"
+    url = "http://172.20.122.192:8000/msg/add_message/"
     payload = json.dumps({"phn_no": phone, "message": message})
     headers = {"Content-Type": "application/json"}
     requests.post(url, data=payload, headers=headers)
@@ -963,11 +968,6 @@ class SubTaskUpdateView(APIView):
         serializer = SubTaskSerializer(subtask)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-import google.generativeai as genai
-import base64
-import os
-from bing_image_downloader import downloader
-
 model = genai.GenerativeModel('gemini-2.0-flash')
 def clean_json_string(data):
     cleaned_data = re.sub(r'[\x00-\x1F\x7F]', '', data).strip()
@@ -1007,6 +1007,37 @@ def image_to_base64(image_path):
             return base64.b64encode(image_file.read()).decode('utf-8')
     except FileNotFoundError:
         return "No image found"
+def yt_search(yt_search):
+    video_list = []
+    from googleapiclient.discovery import build
+
+    API_KEY = "AIzaSyCKT_61ACyA0gtQeh0pArUc-NUgBOaTIrc"
+
+    youtube = build("youtube", "v3", developerKey=API_KEY)
+
+    hashtag =yt_search
+
+    search_response = youtube.search().list(
+        q=hashtag,
+        part="id",
+        type="video",
+        maxResults=4
+    ).execute()
+
+    video_ids = [item["id"]["videoId"] for item in search_response["items"]]
+
+    video_response = youtube.videos().list(
+        part="snippet,statistics",
+        id=",".join(video_ids)
+    ).execute()
+    for video in video_response["items"]:
+        title = video["snippet"]["title"]
+        video_url = f"https://www.youtube.com/watch?v={video['id']}"
+       
+        video_list.append({"title": title, "url": video_url})
+
+    return video_list
+
 
 @csrf_exempt
 def trend_summarizer_view(request):
@@ -1014,6 +1045,7 @@ def trend_summarizer_view(request):
         data = json.loads(request.body)
         trend = data.get("trend", "cyclone alert")
         date = data.get("date", "13/03/2025")
+        video_list=yt_search(trend)
         prompt = (
         f"""You are a good summarizer. Summarize the result based on the given date.
         The summary should be related to disaster trends in India. Return the result more than 1000 words.
@@ -1024,7 +1056,7 @@ def trend_summarizer_view(request):
         3. Add text-based stickers or reactions to improve readability but don't include special symbols like ** or \n like that.
         5. Summarized values should be based on real-time data, no fabricated information.
         6. Avoid personal analysis or unrelated content.
-        7. Don't include Okay, here's a detailed summary about directly start with summary.
+        7. Don't include Okay, here's a detailed summary about directly start with summary and also avoid based on available return only string no need to mention ```string ```.
         """
     )
 
@@ -1032,7 +1064,7 @@ def trend_summarizer_view(request):
             contents=prompt,
         )
         cleaned_data = response.text
-
+        
         search_term = f"Real time image of a {trend} disaster India"
         output_path = "media"
 
@@ -1062,7 +1094,322 @@ def trend_summarizer_view(request):
         # Convert image to Base64 if found
         image_base64 = image_to_base64(image_path) if image_path else "No image found"
 
-        data = {"summary": cleaned_data, "image_base64": image_base64}
+        data = {"summary": cleaned_data, "image_base64": image_base64,"video_list":video_list}
+        # print(data)
         print(data)
         return JsonResponse(data)
+
+def search(request,search):
+    genai.configure(api_key="AIzaSyBMugtwcla3HhBCvYbf42BGHcalDyKQ5g0")
+
+    model = genai.GenerativeModel("gemini-2.0-flash")
+
+    prompt =f"""
+You are an expert disaster information analyst. I will provide you with the name of a disaster. Your task is to:
+
+1.  **Search the internet for current and historical information** about the disaster I provide.
+2.  **Provide a concise summary** of the disaster, including:
+    * What type of disaster it is (e.g., earthquake, flood, hurricane).
+    * When and where it occurred (or is occurring).
+    * The scale and impact of the disaster (e.g., casualties, damage).
+3.  **If the disaster type has occurred previously**, research and provide information on:
+    * Similar past occurrences, including dates and locations.
+    * How past occurrences were addressed and resolved, including any lessons learned or technological advancements that resulted.
+4.  **Offer potential suggestions** for:
+    * Mitigation efforts to reduce future impact.
+    * Response strategies for current or similar future events.
+    * Recovery actions.
+5.  **Provide sources** for your information, including relevant websites and articles.
+
+Note : Dont give that i asked you a question for that you are answering like Okay, I will analyze the dont include these kinds of words
+
+Disaster Name: {search}
+"""
+
+    response = model.generate_content(prompt)
+
+    response_data = {
+        "summary": response.text
+    }
+
+    return JsonResponse(response_data, safe=False)
+
+
+def fetch_all_todos(request):
+    todos = TodoTitle.objects.prefetch_related('subtasks').all()
+    data = [
+        {
+            "id": todo.id,
+            "title": todo.title,
+            "created_by": todo.created_by.id,
+            "created_on": todo.created_on,
+            "subtasks": [
+                {
+                    "id": subtask.id,
+                    "description": subtask.description,
+                    "completed": subtask.completed,
+                    "completion_approved": subtask.completion_approved,
+                    "assigned_volunteer": subtask.assigned_volunteer.id if subtask.assigned_volunteer else None,
+                    "created_on": subtask.created_on,
+                    "completed_on": subtask.completed_on
+                } for subtask in todo.subtasks.all()
+            ]
+        } for todo in todos
+    ]
+    return JsonResponse({"todos": data}, safe=False)
+
+# 2. Create a New Todo or Mark a Subtask as Completed
+@csrf_exempt
+def create_or_update_todo(request):
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            title = data.get("title")
+            created_by_id = data.get("created_by")
+
+            if not title or not created_by_id:
+                return JsonResponse({"error": "Title and created_by are required"}, status=400)
+
+            todo = TodoTitle.objects.create(title=title, created_by_id=created_by_id)
+            return JsonResponse({"message": "Todo created successfully", "id": todo.id}, status=201)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+    elif request.method == "PUT":
+        try:
+            data = json.loads(request.body)
+            subtask_id = data.get("subtask_id")
+            completed = data.get("completed")
+
+            subtask = get_object_or_404(SubTask, id=subtask_id)
+            subtask.completed = completed
+            subtask.completed_on = timezone.now() if completed else None
+            subtask.save()
+
+            return JsonResponse({"message": "Subtask updated successfully"})
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+# 3. Delete a Todo or Subtask
+@csrf_exempt
+def delete_todo_or_subtask(request):
+    if request.method == "DELETE":
+        try:
+            data = json.loads(request.body)
+            todo_id = data.get("todo_id")
+            subtask_id = data.get("subtask_id")
+
+            if todo_id:
+                todo = get_object_or_404(TodoTitle, id=todo_id)
+                todo.delete()
+                return JsonResponse({"message": "Todo deleted successfully"})
+
+            elif subtask_id:
+                subtask = get_object_or_404(SubTask, id=subtask_id)
+                subtask.delete()
+                return JsonResponse({"message": "Subtask deleted successfully"})
+
+            return JsonResponse({"error": "Provide either a todo_id or subtask_id"}, status=400)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+       
+@csrf_exempt
+def create_subtask(request):
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            todo_title_id = data.get("todo_title")  # Parent Todo ID
+            description = data.get("description")  # Subtask description
+            assigned_volunteer_id = data.get("assigned_volunteer")  # Optional Volunteer
+            print("hello")
+            if not todo_title_id or not description:
+                return JsonResponse({"error": "Todo ID and description are required"}, status=400)
+
+            # Check if the TodoTitle exists
+            todo_title = get_object_or_404(TodoTitle, id=todo_title_id)
+            print(todo_title)
+            # Create the subtask
+            subtask = SubTask.objects.create(
+                todo_title=todo_title,
+                description=description,
+                assigned_volunteer_id=assigned_volunteer_id  # Can be None if not provided
+            )
+
+            return JsonResponse({
+                "message": "Subtask created successfully",
+                "subtask_id": subtask.id
+            }, status=201)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def hazlebot_view(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        query = data.get("query", "Hello there")
+        phone_id = data.get("phone_id", "123456789")
+        prompt = (
+        f"""You are a people helper and consider you as a rescue head you need to give suggestion,adviser
+        based on the user query you need to identify the solution or previous occurence idea which helps to solve the issues like that and also includes details about weather and locations
+        ##Instruction:
+        1.Avoid saying like this in your string operation or other context simply provide the answer
+        2.Don't include \n or other symbols like **,## avoid including this symbol instead use emoji and avoiding saying that okay,here,avoid adding more emoji from given simply tell the answer alone based on the query and also real time data in your response
+        ##Query:{query}
+        """
+    )
+
+        response = model.generate_content(
+            contents=prompt,
+        )
+        cleaned_data = response.text
+
+        data = {"Response": cleaned_data}
+        print(data)
+        return JsonResponse(data)
+
+
+def fetch_all_todos(request):
+    todos = TodoTitle.objects.prefetch_related('subtasks').all()
+    data = [
+        {
+            "id": todo.id,
+            "title": todo.title,
+            "created_by": todo.created_by.id,
+            "admin_group": todo.admin_group.id,
+            "created_on": todo.created_on,
+            "subtasks": [
+                {
+                    "id": subtask.id,
+                    "description": subtask.description,
+                    "completed": subtask.completed,
+                    "completion_approved": subtask.completion_approved,
+                    "assigned_volunteer": subtask.assigned_volunteer.id if subtask.assigned_volunteer else None,
+                    "created_on": subtask.created_on,
+                    "completed_on": subtask.completed_on
+                } for subtask in todo.subtasks.all()
+            ]
+        } for todo in todos
+    ]
+    return JsonResponse({"todos": data}, safe=False)
+
+
+# 2. Create a New Todo
+@csrf_exempt
+def create_or_update_todo(request):
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            title = data.get("title")
+            created_by_id = data.get("created_by")
+            admin_group_id = data.get("admin_group")
+
+            if not title or not created_by_id or not admin_group_id:
+                return JsonResponse({"error": "Title, created_by, and admin_group are required"}, status=400)
+
+            created_by = get_object_or_404(AdminUser, id=created_by_id)
+            admin_group = get_object_or_404(AdminGroups, id=admin_group_id)
+
+            todo = TodoTitle.objects.create(title=title, created_by=created_by, admin_group=admin_group)
+            return JsonResponse({"message": "Todo created successfully", "id": todo.id}, status=201)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+
+# 3. Update a Subtask (Mark as Completed)
+@csrf_exempt
+def update_subtask(request):
+    if request.method == "PUT":
+        try:
+            data = json.loads(request.body)
+            subtask_id = data.get("subtask_id")
+            completed = data.get("completed")
+            approved_by_admin = data.get("approved_by_admin", False)  # Only Admin can approve
+
+            subtask = get_object_or_404(SubTask, id=subtask_id)
+
+            if completed:  
+                subtask.completed = True
+                subtask.completed_on = timezone.now()
+
+            # Check if an Admin is approving the completion
+            if approved_by_admin:
+                admin_id = data.get("admin_id")
+                admin_user = get_object_or_404(AdminUser, id=admin_id)
+
+                # Ensure Admin can approve only if they belong to the same group
+                if subtask.todo_title.admin_group.admin.id != admin_user.id:
+                    return JsonResponse({"error": "Admin does not have permission to approve this subtask"}, status=403)
+
+                subtask.completion_approved = True
+
+            subtask.save()
+            return JsonResponse({"message": "Subtask updated successfully"})
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+
+# 4. Delete a Todo or Subtask
+@csrf_exempt
+def delete_todo_or_subtask(request):
+    if request.method == "DELETE":
+        try:
+            data = json.loads(request.body)
+            todo_id = data.get("todo_id")
+            subtask_id = data.get("subtask_id")
+
+            if todo_id:
+                todo = get_object_or_404(TodoTitle, id=todo_id)
+                todo.delete()
+                return JsonResponse({"message": "Todo deleted successfully"})
+
+            elif subtask_id:
+                subtask = get_object_or_404(SubTask, id=subtask_id)
+                subtask.delete()
+                return JsonResponse({"message": "Subtask deleted successfully"})
+
+            return JsonResponse({"error": "Provide either a todo_id or subtask_id"}, status=400)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+
+# 5. Create a New Subtask
+@csrf_exempt
+def create_subtask(request):
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+            todo_title_id = data.get("todo_title")  # Parent Todo ID
+            description = data.get("description")  # Subtask description
+            assigned_volunteer_id = data.get("assigned_volunteer")  # Optional Volunteer
+
+            if not todo_title_id or not description:
+                return JsonResponse({"error": "Todo ID and description are required"}, status=400)
+
+            todo_title = get_object_or_404(TodoTitle, id=todo_title_id)
+
+            subtask = SubTask.objects.create(
+                todo_title=todo_title,
+                description=description,
+                assigned_volunteer_id=assigned_volunteer_id  # Can be None if not provided
+            )
+
+            return JsonResponse({
+                "message": "Subtask created successfully",
+                "subtask_id": subtask.id
+            }, status=201)
+
+        except Exception as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+
+
+
 

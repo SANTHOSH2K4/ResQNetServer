@@ -9,7 +9,7 @@ from .views import (
     GroupListView, CreateGroupView,
     CreateVolunteerRequestView,ApproveVolunteerView,
     SendMessageView, trend_extractor_view,
-    trend_summarizer_view
+    trend_summarizer_view,fetch_all_todos,create_or_update_todo,delete_todo_or_subtask,create_subtask,hazlebot_view,update_subtask
 )
 
 urlpatterns = [
@@ -29,7 +29,7 @@ urlpatterns = [
     path('admin-group-create/', AdminGroupsCreateView.as_view(), name='admin-groups-create'),
     path('admin-group-update/<int:pk>/update/', AdminGroupsUpdateView.as_view(), name='admin-groups-update'),
     path('todo-titles/', TodoTitleCreateView.as_view(), name='todo-titles-create'),
-    path('todo-titles/<int:pk>/update/', TodoTitleUpdateView.as_view(), name='todo-titles-update'),    
+    path('todo-titles/<int:pk>/update/', TodoTitleUpdateView.as_view(), name='todo-titles-update'),
     path('subtasks/', SubTaskCreateView.as_view(), name='subtasks-create'),
     path('subtasks/<int:pk>/update/', SubTaskUpdateView.as_view(), name='subtasks-update'),
     path('api/send_otp/', send_otp, name='send_otp'),
@@ -39,5 +39,17 @@ urlpatterns = [
     path('api/send_message/', SendMessageView.as_view(), name='send_message'),
     path('api/trend-extractor/', trend_extractor_view, name='trend_extractor_api'),
     path('api/trend-summarizer/', trend_summarizer_view, name='trend_summarizer_api'),
+     path('todos/', fetch_all_todos, name='fetch_all_todos'),
+    path('todos/manage/', create_or_update_todo, name='create_or_update_todo'),
+    path('todos/delete/', delete_todo_or_subtask, name='delete_todo_or_subtask'),
+     path('subtasks/create/', create_subtask, name='create_subtask'),
+     path('api/hazlebot/',hazlebot_view,name='hazlebot_view'),
+      path('todos/', fetch_all_todos, name='fetch_all_todos'),
+    path('todos/manage/', create_or_update_todo, name='create_or_update_todo'),
+    path('todos/delete/', delete_todo_or_subtask, name='delete_todo_or_subtask'),
+     path('subtasks/create/', create_subtask, name='create_subtask'),
+     path('subtasks/update/', update_subtask, name='update_subtask'),
+
+
 
 ]
